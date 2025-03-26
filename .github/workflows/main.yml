@@ -1,104 +1,56 @@
-name: Convert AsciiDoc to PDF
-
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4  
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-
-      - name: Install textlint and rules
-        run: |
-          npm install -g textlint
-          npm install -g textlint-rule-preset-ja-technical-writing
-          npm install -g textlint-plugin-asciidoctor
-          
-      - name: Run textlint on .adoc files
-        run: |
-          textlint --config .textlintrc --format stylish "**/*.adoc"
-
-      - name: Fail on textlint errors
-        if: failure()
-        run: exit 1
-
-      - name: Install Asciidoctor and Asciidoctor-PDF with CJK Support
-        run: |
-          sudo apt update
-          sudo gem install bundler
-          sudo apt install -y ruby ruby-dev
-          export PATH="$(ruby -e 'puts Gem.user_dir')/bin:$PATH"
-          bundle init
-          echo "gem 'matrix'" >> Gemfile
-          echo "gem 'rexml'" >> Gemfile
-          echo "gem 'prawn-svg'" >> Gemfile
-          echo "gem 'asciidoctor'" >> Gemfile
-          echo "gem 'asciidoctor-pdf'" >> Gemfile
-          # echo "gem 'asciidoctor-pdf-cjk'" >> Gemfile
-          bundle config set --local path 'vendor/bundle'
-          bundle install
-
-      - name: Convert AsciiDoc files to PDF with Japanese Fonts
-        run: |
-          mkdir -p output_pdfs
-          find ./ -maxdepth 1 -name "*.adoc" | while read file; do
-            filename=$(basename "$file" .adoc)
-            bundle exec asciidoctor-pdf \
-              -a pdf-theme=default-with-fallback-font \
-              -o "output_pdfs/${filename}.pdf" "$file"
-          done
-
-      - name: Upload all PDFs as artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: generated-pdfs
-          path: output_pdfs/*.pdf
-
-      - name: Upload PDFs to Box
+ - name: Upload PDFs to Box
         run: |
           echo "Uploading PDFs to Box..."
-          
           BOX_ACCESS_TOKEN=${{ secrets.BOX_ACCESS_TOKEN }}
           BOX_FOLDER_ID=${{ secrets.BOX_FOLDER_ID }}
-
           for file in output_pdfs/*.pdf; do
             if [ -f "$file" ]; then
               filename=$(basename "$file")
               echo "Processing: $filename"
-
-              # 存在チェック
-              FILE_ID=$(curl -s -X GET "https://api.box.com/2.0/folders/${BOX_FOLDER_ID}/items?fields=id,name" \
-                -H "Authorization: Bearer ${BOX_ACCESS_TOKEN}" | jq -r --arg fname "$filename" '.entries[] | select(.name==$fname) | .id')
-
+              # API_RESPONSE取得
+              API_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/box_response.json -X GET \
+                "https://api.box.com/2.0/folders/${BOX_FOLDER_ID}/items?fields=id,name" \
+                -H "Authorization: Bearer ${BOX_ACCESS_TOKEN}")
+              # HTTP_STATUS取得
+              HTTP_STATUS=$(echo "$API_RESPONSE" | tail -n1)
+              # HTTP_STATUSが200以外場合，エラー
+              if [[ "$HTTP_STATUS" -ne 200 ]]; then
+                echo "Error: Box API request failed with status code: $HTTP_STATUS"
+                cat /tmp/box_response.json  # responseを出力
+                exit 1
+              fi
+              # FILE_ID取得
+              FILE_ID=$(jq -r --arg fname "$filename" '.entries[] | select(.name==$fname) | .id' /tmp/box_response.json)
+              # ファイル存在する場合、上書き保存
               if [ -n "$FILE_ID" ]; then
                 echo "File exists (ID: $FILE_ID), overwriting..."
-                # ファイル存在する場合、上書き
-                curl -X POST "https://upload.box.com/api/2.0/files/${FILE_ID}/content" \
+                UPLOAD_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/box_upload_response.json -X POST \
+                  "https://upload.box.com/api/2.0/files/${FILE_ID}/content" \
                   -H "Authorization: Bearer ${BOX_ACCESS_TOKEN}" \
                   -H "Content-Type: multipart/form-data" \
-                  -F file=@"${file}"
+                  -F file=@"${file}")
+                UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | tail -n1)
+                if [[ "$UPLOAD_STATUS" -ne 200 ]]; then
+                  echo "Error: Upload failed with status code: $UPLOAD_STATUS"
+                  cat /tmp/box_upload_response.json
+                  exit 1
+                fi
+              # ファイル存在しない場合、アップロート
               else
                 echo "File does not exist, uploading..."
-                # ファイル存在しない場合、アップロート
                 JSON_ATTR="{\"name\":\"${filename}\", \"parent\": {\"id\": \"${BOX_FOLDER_ID}\"}}"
-                curl -X POST "https://upload.box.com/api/2.0/files/content" \
+                UPLOAD_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/box_upload_response.json -X POST \
+                  "https://upload.box.com/api/2.0/files/content" \
                   -H "Authorization: Bearer ${BOX_ACCESS_TOKEN}" \
                   -H "Content-Type: multipart/form-data" \
                   -F attributes="${JSON_ATTR}" \
-                  -F file=@"${file}"
+                  -F file=@"${file}")
+                UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | tail -n1)
+                if [[ "$UPLOAD_STATUS" -ne 200 ]]; then
+                  echo "Error: Upload failed with status code: $UPLOAD_STATUS"
+                  cat /tmp/box_upload_response.json
+                  exit 1
+                fi
               fi
             fi
           done
