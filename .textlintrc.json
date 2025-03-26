@@ -1,0 +1,19 @@
+{
+  "rules": {
+    "preset-ja-technical-writing": {
+      "sentence-length": {
+        "max": 120
+      },
+      "no-exclamation-question-mark": {
+        "allow": ["?"]
+      },
+      "max-kanji-continuous-len": {
+        "max": 10,
+        "allow": []
+      }
+    }
+  },
+  "plugins": [
+    "asciidoctor"
+  ]
+}
